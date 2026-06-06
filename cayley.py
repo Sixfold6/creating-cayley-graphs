@@ -1,5 +1,5 @@
 """
-Cayley graph generator for finitely presented semigroups and monoids.
+Left Cayley graph generator for finitely presented semigroups and monoids.
 
 Usage (library):
     from cayley import cayley_graph
@@ -84,7 +84,9 @@ def build_cayley_graph(
     ball_size: int,
     monoid: bool = True,
 ) -> tuple[dict[str, int], list[tuple[str, str, str]]]:
-    """Build the right Cayley graph ball of radius ball_size.
+    """Build the left Cayley graph ball of radius ball_size.
+
+    An edge g: w -> g·w (left-multiply by generator g).
 
     Returns:
         nodes: canonical word -> BFS depth from identity (or generators if semigroup)
@@ -105,7 +107,7 @@ def build_cayley_graph(
         next_frontier: set[str] = set()
         for word in frontier:
             for gen in generators:
-                target = normalize(word + gen, rules)
+                target = normalize(gen + word, rules)
                 if target not in visited:
                     visited[target] = depth + 1
                     next_frontier.add(target)
@@ -118,7 +120,7 @@ def build_cayley_graph(
     edges: list[tuple[str, str, str]] = []
     for word in visited:
         for gen in generators:
-            target = normalize(word + gen, rules)
+            target = normalize(gen + word, rules)
             if target in visited:
                 e = (word, target, gen)
                 if e not in seen:
@@ -163,19 +165,6 @@ def draw_cayley_graph(
             fontcolor=gen_color[gen],
         )
 
-    # Legend as a separate cluster
-    with dot.subgraph(name='cluster_legend') as sub:
-        sub.attr(label='generators', style='dashed', color='gray80',
-                 fontname='Helvetica', fontsize='11')
-        prev: Optional[str] = None
-        for gen in generators:
-            lid = f'__leg_{gen}__'
-            sub.node(lid, label=gen, shape='plaintext', style='',
-                     fillcolor='white', fontcolor=gen_color[gen], fontsize='12')
-            if prev:
-                sub.edge(prev, lid, style='invis')
-            prev = lid
-
     return dot.render(output_file, format=fmt, cleanup=True, view=view)
 
 
@@ -197,6 +186,87 @@ def cayley_graph(
                              label_fn=label_fn, pos_fn=pos_fn)
 
 
+def build_schutzenberger_graph(
+    generators: list[str],
+    rules: list[tuple[str, str]],
+    element: str,
+    ball_size: int,
+) -> tuple[dict[str, int], list[tuple[str, str, str]]]:
+    """Find the Schützenberger graph of element in the left Cayley graph.
+
+    Explores up to ball_size steps from element by left-multiplying generators,
+    then extracts the strongly connected component of element from that ball.
+    The SCC equals the L-class of element (elements generating the same principal
+    left ideal) within the explored region.
+    """
+    root = normalize(element, rules)
+
+    # Forward BFS from root
+    visited: dict[str, int] = {root: 0}
+    frontier: set[str] = {root}
+    for depth in range(ball_size):
+        next_frontier: set[str] = set()
+        for word in frontier:
+            for gen in generators:
+                target = normalize(gen + word, rules)
+                if target not in visited:
+                    visited[target] = depth + 1
+                    next_frontier.add(target)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    # Collect all edges within the ball and build reverse adjacency list
+    radj: dict[str, list[str]] = {w: [] for w in visited}
+    seen: set[tuple[str, str, str]] = set()
+    all_edges: list[tuple[str, str, str]] = []
+    for word in visited:
+        for gen in generators:
+            target = normalize(gen + word, rules)
+            if target in visited:
+                e = (word, target, gen)
+                if e not in seen:
+                    seen.add(e)
+                    all_edges.append(e)
+                    radj[target].append(word)
+
+    # Backward BFS from root on reversed edges — finds all nodes from which root is reachable
+    back_visited: set[str] = {root}
+    back_frontier: set[str] = {root}
+    while back_frontier:
+        nxt: set[str] = set()
+        for node in back_frontier:
+            for pred in radj[node]:
+                if pred not in back_visited:
+                    back_visited.add(pred)
+                    nxt.add(pred)
+        back_frontier = nxt
+
+    # SCC = forward-reachable from root ∩ nodes from which root is reachable
+    scc: set[str] = set(visited) & back_visited
+    scc_nodes = {w: visited[w] for w in scc}
+    scc_edges = [(s, t, g) for s, t, g in all_edges if s in scc and t in scc]
+    return scc_nodes, scc_edges
+
+
+def schutzenberger_graph(
+    generators: list[str],
+    rules: list[tuple[str, str]],
+    element: str,
+    ball_size: int,
+    output_file: str = 'schutzenberger_graph',
+    engine: str = 'dot',
+    fmt: str = 'png',
+    view: bool = False,
+    label_fn: Optional[Callable[[str], str]] = None,
+    pos_fn: Optional[Callable[[str], str]] = None,
+) -> str:
+    """Build and render the Schützenberger graph of element. Returns the output file path."""
+    nodes, edges = build_schutzenberger_graph(generators, rules, element, ball_size)
+    return draw_cayley_graph(nodes, edges, generators, output_file, engine, fmt, view,
+                             label_fn=label_fn, pos_fn=pos_fn)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -213,7 +283,7 @@ def _parse_rules(strs: list[str]) -> list[tuple[str, str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Generate the right Cayley graph of a finitely presented semigroup/monoid.',
+        description='Generate the left Cayley graph of a finitely presented semigroup/monoid.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -251,6 +321,9 @@ Examples:
     parser.add_argument('--grid', action='store_true',
                         help='Grid layout: generators[0] goes downward, generators[1] '
                              'goes rightward; switches engine to neato')
+    parser.add_argument('--element', default=None, metavar='WORD',
+                        help='If given, draw the Schützenberger graph (L-class SCC) of '
+                             'this element instead of the full Cayley graph')
 
     args = parser.parse_args()
     gens = [g.strip() for g in args.generators.split(',')]
@@ -267,13 +340,20 @@ Examples:
         if engine == 'dot':
             engine = 'neato'
 
-    nodes, edges = build_cayley_graph(gens, rules, args.ball_size, monoid=not args.semigroup)
-    print(f"Elements in ball of depth {args.ball_size}: {len(nodes)}", file=sys.stderr)
-    print(f"Edges: {len(edges)}", file=sys.stderr)
+    if args.element is not None:
+        nodes, edges = build_schutzenberger_graph(gens, rules, args.element, args.ball_size)
+        print(f"Schützenberger graph of '{args.element}': {len(nodes)} elements, "
+              f"{len(edges)} edges", file=sys.stderr)
+        output = args.output if args.output != 'cayley_graph' else 'schutzenberger_graph'
+    else:
+        nodes, edges = build_cayley_graph(gens, rules, args.ball_size, monoid=not args.semigroup)
+        print(f"Elements in ball of depth {args.ball_size}: {len(nodes)}", file=sys.stderr)
+        print(f"Edges: {len(edges)}", file=sys.stderr)
+        output = args.output
 
     path = draw_cayley_graph(
         nodes, edges, gens,
-        output_file=args.output,
+        output_file=output,
         engine=engine,
         fmt=args.format,
         view=args.view,
